@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.sqlite3
+*.sqlite
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+pipenv/
+Pipfile.lock  # اختر إبقاءه إذا أردت بيئة محددة، أو تجاهله إذا أردت إعادة إنشاءه
+
+# Django
+*.log
+local_settings.py
+media/
+static/
+
+# Environment variables
+.env
+
+# Database dumps
+*.dump
+*.sql.gz
+*.sql
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Project specific
+logs/
+*.pid

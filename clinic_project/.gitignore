@@ -24,6 +24,7 @@ Pipfile.lock  # اختر إبقاءه إذا أردت بيئة محددة، أو
 local_settings.py
 media/
 static/
+clinic_project/clinic_project/settings.py/
 
 # Environment variables
 .env

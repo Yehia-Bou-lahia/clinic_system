@@ -10,8 +10,10 @@ CREATE TABLE IF NOT EXISTS patient_profiles(
     chronic_diseases TEXT,-- قائمة الأمراض المزمنة والحساسية كنصوص مفصولة بفواصل
     allergies TEXT,-- قائمة الأمراض المزمنة والحساسية كنصوص مفصولة بفواصل
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,  
 );
+
+CREATE INDEX idx_patient_profiles_user_id ON patient_profiles(user_id); -- index for user_id in patient_profiles
 
 CREATE TABLE IF NOT EXISTS doctor_profiles(
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -22,8 +24,6 @@ CREATE TABLE IF NOT EXISTS doctor_profiles(
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-
-CREATE INDEX idx_patient_profiles_user_id ON patient_profiles(user_id); -- index for user_id in patient_profiles
 
 CREATE TABLE IF NOT EXISTS doctor_profiles (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

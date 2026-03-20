@@ -17,3 +17,9 @@ class DuplicateEmailError(Exception):
 
 class AuthenticationError(Exception):
     pass
+
+class PatientNotFoundError(Exception):
+    pass
+
+class PatientProfileAlreadyExistsError(Exception):
+    pass

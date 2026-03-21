@@ -23,3 +23,10 @@ class PatientNotFoundError(Exception):
 
 class PatientProfileAlreadyExistsError(Exception):
     pass
+class DoctorNotFoundError(DatabaseError):
+    """Raised when a doctor profile is not found"""
+    pass
+
+class DuplicateLicenseError(DatabaseError):
+    """Raised when trying to create a doctor with an existing license number"""
+    pass

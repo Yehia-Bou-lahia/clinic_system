@@ -30,3 +30,14 @@ class DoctorNotFoundError(DatabaseError):
 class DuplicateLicenseError(DatabaseError):
     """Raised when trying to create a doctor with an existing license number"""
     pass
+class AppointmentNotFoundError(DatabaseError):
+    """Raised when an appointment is not found"""
+    pass
+
+class AppointmentConflictError(DatabaseError):
+    """Raised when trying to book an already taken slot"""
+    pass
+
+class InvalidAppointmentStatusError(DatabaseError):
+    """Raised when trying to change to an invalid status"""
+    pass

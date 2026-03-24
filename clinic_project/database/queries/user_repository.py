@@ -1,6 +1,6 @@
 import bcrypt
 from psycopg2 import IntegrityError
-from clinic_project.core.exceptions import DatabaseError, DuplicateEmailError
+from core.exceptions import DatabaseError, DuplicateEmailError
 from database.connection import db
 
 _DUMMY_HASH = bcrypt.hashpw(b"dummy_password", bcrypt.gensalt(rounds=12))

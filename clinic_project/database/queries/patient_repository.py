@@ -67,7 +67,7 @@ class PatientRepository:
                         f"Patient profile for user {user_id} already exists"
                     )
                 raise
-        
+
     @staticmethod
     def get_patient_by_user_id(user_id: uuid.UUID) -> Optional[Dict[str, Any]]:
         query = """
@@ -80,11 +80,8 @@ class PatientRepository:
         """
         with db.get_cursor() as cursor:
             cursor.execute(query, (user_id,))
-            result = cursor.fetchone()
-            if not result:
-                raise PatientNotFoundError(f"No patient profile found for user_id {user_id}")
-            return result
-    
+            return cursor.fetchone()   # تعيد None إذا لم يوجد
+
     @staticmethod
     def get_patient_by_id(patient_id: uuid.UUID) -> Optional[Dict[str, Any]]:
         query = """
@@ -97,21 +94,19 @@ class PatientRepository:
         """
         with db.get_cursor() as cursor:
             cursor.execute(query, (patient_id,))
-            result = cursor.fetchone()
-            if not result:
-                raise PatientNotFoundError(f"No patient profile found for patient_id {patient_id}")
-            return result
-    
+            return cursor.fetchone()   # تعيد None إذا لم يوجد
+
     @staticmethod
     def update_patient_profile(
         patient_id: uuid.UUID,
         **fields: Any
-    ) -> Optional[Dict[str, Any]]:
-        
+    ) -> Dict[str, Any]:
         if not fields:
-            return PatientRepository.get_patient_by_id(patient_id)
+            patient = PatientRepository.get_patient_by_id(patient_id)
+            if not patient:
+                raise PatientNotFoundError(f"Patient profile with id {patient_id} not found")
+            return patient
 
-        # بناء جملة SET مع placeholders
         set_clauses = []
         values = []
         for key, value in fields.items():
@@ -120,9 +115,8 @@ class PatientRepository:
             set_clauses.append(f"{key} = %s")
             values.append(value)
 
-        # إضافة updated_at
         set_clauses.append("updated_at = CURRENT_TIMESTAMP")
-        values.append(patient_id)  # لـ WHERE
+        values.append(patient_id)
 
         query = f"""
         UPDATE patient_profiles
@@ -150,11 +144,21 @@ class PatientRepository:
         """
         with db.get_cursor() as cursor:
             cursor.execute(query, (patient_id,))
-            deleted = cursor.fetchone()
-            if not deleted:
-                raise PatientNotFoundError(f"Patient profile with id {patient_id} not found or already deleted")
-            return True
-        
+            return cursor.fetchone() is not None   # True إذا نجح، False إذا لم يجد
+
+    @staticmethod
+    def restore_patient_profile(patient_id: uuid.UUID) -> bool:
+        """استعادة ملف مريض محذوف منطقياً."""
+        query = """
+            UPDATE patient_profiles
+            SET deleted_at = NULL
+            WHERE id = %s AND deleted_at IS NOT NULL
+            RETURNING id;
+        """
+        with db.get_cursor() as cursor:
+            cursor.execute(query, (patient_id,))
+            return cursor.fetchone() is not None
+
     @staticmethod
     def list_active_patients(limit: int = 20, offset: int = 0) -> List[Dict[str, Any]]:
         query = """

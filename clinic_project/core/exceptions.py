@@ -41,3 +41,11 @@ class AppointmentConflictError(DatabaseError):
 class InvalidAppointmentStatusError(DatabaseError):
     """Raised when trying to change to an invalid status"""
     pass
+
+class VisitReportNotFoundError(DatabaseError):
+    """Raised when a visit report is not found"""
+    pass
+
+class VisitReportAlreadyExistsError(DatabaseError):
+    """Raised when trying to create a report for an appointment that already has one"""
+    pass

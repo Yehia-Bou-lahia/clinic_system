@@ -1,272 +1,239 @@
-#from multiprocessing import context
-import uuid
-import time 
-import logging
+# core/event_bus.py
+import concurrent.futures
 import threading
-from datetime import date, datetime
-from functools import lru_cache
-from typing import Dict, Any, Optional, List, Tuple, Callable
-
-from database.connection import db
-from core.exceptions import PermissionDenied
+import logging
+import time
+import uuid
+from dataclasses import dataclass, field
+from typing import Callable, Dict, List, Optional, Any, Tuple, Union
+from functools import wraps
 
 logger = logging.getLogger(__name__)
 
-class PolicyEngine:
 
+@dataclass
+class Event:
+    """هيكل الحدث المنظم."""
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    name: str = ""
+    payload: Any = None
+    timestamp: float = field(default_factory=time.time)
+
+
+class EventBus:
     """
-    محرك صلاحيات آمن – يستخدم معالجات شروط محددة مسبقًا (لا تنفيذ كود).
-    يدعم TTL للـ cache لتجنب بقاء القواعد القديمة.
+    ناقل أحداث محسن:
+    - دعم المستمعين المتزامنين (sync) وغير المتزامنين (async).
+    - آلية إعادة المحاولة للمستمعين غير المتزامنين.
+    - مراقبة زمن التنفيذ وتحذير البطء.
+    - منع تكرار التسجيل.
+    - حماية من الضغط العالي (rate limiting).
+    - تخزين الأحداث الفاشلة (dead letter).
+    - قابل للاختبار (لا يعتمد كلياً على Singleton).
     """
-    CACHE_TTL = 300 # 5 دقائق   
-    USER_ROLE_CACHE_TTL = 300
-    
-    def __init__(self):
-        self._cache: Dict[str, Tuple[List[Dict[str, Any]], float]] = {}  # cache format: {user_id: (rules, timestamp)}
-        self._cache_lock = threading.RLock()# لضمان سلامة الوصول إلى الكاش في بيئة متعددة الخيوط
-        #تخزين مؤقت لدور المستخدم معTTL
-        self._user_role_cache: Dict[str, Tuple[uuid.UUID, float]] = {}
-        self._user_role_lock = threading.RLock()
 
-        # تعريف معالجات الشروط المسموح بها مسبقًا    
-    _condition_handlers: Dict[str, Callable[[Dict[str, Any]], bool]] = {
-        # المريض يرى ملفه الخاص فقط
-        "is_own_patient": lambda ctx: _is_own_patient(ctx),
-        # الطبيب يرى ملفات المرضى الذين تم تعيينهم له فقط   
-        "is_assigned_doctor": lambda ctx: _is_assigned_doctor(ctx),
-        # الممرض يرى ملفات المرضى في نفس القسم فقط
-        "is_today_only": lambda ctx: _is_today_only(ctx),
-        #يتحقق مما إذا كان المورد مرتبطاً بمريض معين (أي أن للمورد حقل patient_id)، دون مقارنته مع المستخدم.
-        "is_for_patient": lambda ctx: _is_for_patient(ctx),
-        #يتحقق مما إذا كان المورد مرتبطاً بمريض معين (أي أن للمورد حقل patient_id) وأن تاريخ الوصول هو في المستقبل فقط.
-        "is_future_only": lambda ctx: _is_future_only(ctx),  # تم تصحيح الاسم
-        "is_any": lambda ctx: True,  # شرط عام يسمح بالوصول دائماً (يمكن استخدامه كقاعدة افتراضية)   
-    }
+    MAX_LISTENERS_PER_EVENT = 50
+    MAX_PENDING_PER_EVENT = 100       # للـ rate limiting (قيد التنفيذ)
+    DEFAULT_RETRY_ATTEMPTS = 2
+    DEFAULT_RETRY_BACKOFF = 1.0       # ثواني
 
-    #---------------------------------
-    #  طرق خاصة
-    #---------------------------------
-    def _get_user_role(self, user_id: uuid.UUID) -> Optional[uuid.UUID]:
+    def __init__(self, max_workers: int = 10):
         """
-            جلب دور المستخدم من قاعدة البيانات مع تخزين مؤقت.
+        :param max_workers: عدد الخيوط في تجمع المستمعين غير المتزامنين.
         """
-        cache_key = str(user_id)
-        now = time.time()
-        with self._user_role_lock:
-            if cache_key in self._user_role_cache:
-                role_id, timestamp = self._user_role_cache[cache_key]
-                if now - timestamp < self.USER_ROLE_CACHE_TTL:
-                    return role_id  # إرجاع الدور من الكاش إذا كان صالحاً
-                
-        with db.get_cursor() as cursor:
-            cursor.execute("SELECT role_id FROM users WHERE id = %s", (user_id,))
-            row = cursor.fetchone()
-            role_id = row['role_id'] if row else None  # تم التصحيح
+        self._sync_listeners: Dict[str, List[Callable]] = {}
+        self._async_listeners: Dict[str, List[Callable]] = {}
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="EventBusAsync"
+        )
+        self._lock = threading.RLock()
+        # للمراقبة والـ rate limiting
+        self._pending_counts: Dict[str, int] = {}        # عدد الأحداث قيد التنفيذ لكل نوع
+        self._audit_log: List[Dict] = []                 # سجل نتائج الأحداث (يمكن استبداله بقاعدة بيانات)
+        self._dead_letter: List[Tuple[Event, Exception]] = []  # الأحداث الفاشلة
 
-        with self._user_role_lock:
-            if role_id is not None:
-                self._user_role_cache[cache_key] = (role_id, now)
-        return role_id
-        
-    def _get_cache_key(self, role_id: uuid.UUID, action: str, resource: str) -> str:
-        return f"{role_id}:{action}:{resource}"
-    
-    def _load_policies(self, role_id: uuid.UUID, action: str, resource: str) -> List[Dict[str, Any]]:
+    # ------------------------------------------------------------------
+    # طرق التسجيل والنشر
+    # ------------------------------------------------------------------
+    def subscribe(self, event_name: str, handler: Callable, sync: bool = False) -> Callable[[], None]:
         """
-            تحميل السياسات من قاعدة البيانات مع TTL Cache.
+        تسجيل مستمع لحدث معين.
+        إذا sync = True → ينفذ في نفس الخيط (حجب).
+        إذا sync = False → ينفذ في تجمع الخيوط (غير حجب).
+        تعيد دالة يمكن استدعاؤها لإلغاء الاشتراك.
         """
-        cache_key = self._get_cache_key(role_id, action, resource)
-        now = time.time()
+        with self._lock:
+            listeners = self._sync_listeners if sync else self._async_listeners
+            if len(listeners.get(event_name, [])) >= self.MAX_LISTENERS_PER_EVENT:
+                raise RuntimeError(f"Too many listeners for event {event_name}")
 
-        with self._cache_lock:
-            if cache_key in self._cache:
-                policies, timestamp = self._cache[cache_key]
-                if now - timestamp < self.CACHE_TTL:
-                    return policies  # إرجاع السياسات من الكاش إذا كانت صالحة   
-        
-        #إستعلام من قاعدة البيانات 
-        with db.get_cursor() as cursor:
-            cursor.execute("""
-                SELECT effect, condition, priority
-                FROM policies
-                WHERE role_id = %s AND action = %s AND resource = %s AND is_active = true
-                ORDER BY priority DESC
-            """, (role_id, action, resource))
-            rows = cursor.fetchall()
-            policies = [dict(row) for row in rows]
+            # منع تكرار نفس المستمع
+            if handler in listeners.get(event_name, []):
+                logger.warning(f"Handler {self._handler_name(handler)} already subscribed to {event_name}")
+            else:
+                listeners.setdefault(event_name, []).append(handler)
 
-        with self._cache_lock:
-            self._cache[cache_key] = (policies, now)
-        return policies
-    
-    def _evaluate_condition(self, condition: Optional[str], context: Dict[str, Any]) -> bool:  # تم تصحيح النوع
+        logger.debug(f"Subscribed {self._handler_name(handler)} to event {event_name} (sync={sync})")
+
+        def unsubscribe():
+            with self._lock:
+                try:
+                    listeners[event_name].remove(handler)
+                    if not listeners[event_name]:
+                        del listeners[event_name]
+                except (KeyError, ValueError):
+                    pass
+            logger.debug(f"Unsubscribed {self._handler_name(handler)} from event {event_name}")
+
+        return unsubscribe
+
+    def publish(self, event: Union[Event, str], payload: Any = None) -> None:
         """
-        تقييم الشرط باستخدام المعالجات المحددة مسبقًا.
-        إذا لم يوجد الشرط -> False (رفض آمن).
-        إذا كان الشرط غير معروف -> False (رفض آمن)
+        نشر حدث. يمكن استدعاؤها بـ (Event) أو (event_name, payload).
         """
-        if not condition:
-            # لا يوجد شرط -> رفض (القاعدة الذهبية)
-            logger.debug("Condition is empty -> denied (secure default)")
-            return False
-        handler = self._condition_handlers.get(condition)
-        if handler is None:
-            # شرط غير معروف -> رفض آمن
-            logger.error(f"Unknown condition handler: '{condition}'")
-            return False
-        
+        if isinstance(event, str):
+            event = Event(name=event, payload=payload)
+
+        # التحقق من حدود الضغط العالي (قيد التنفيذ)
+        with self._lock:
+            pending = self._pending_counts.get(event.name, 0)
+            if pending >= self.MAX_PENDING_PER_EVENT:
+                logger.warning(f"Too many pending events for {event.name}: {pending}")
+                return   # أو يمكن رفع استثناء
+            self._pending_counts[event.name] = pending + 1
+
         try:
-            return handler(context)
+            with self._lock:
+                sync_handlers = list(self._sync_listeners.get(event.name, []))
+                async_handlers = list(self._async_listeners.get(event.name, []))
+
+            if not sync_handlers and not async_handlers:
+                logger.debug(f"No listeners for event {event.name}")
+                return
+
+            logger.info(f"Publishing event {event.name} (id={event.id}) "
+                        f"sync={len(sync_handlers)}, async={len(async_handlers)}")
+
+            # تنفيذ المتزامنين
+            for handler in sync_handlers:
+                self._run_sync_handler(handler, event)
+
+            # إطلاق غير المتزامنين
+            for handler in async_handlers:
+                self._executor.submit(self._run_async_handler, handler, event)
+
+        finally:
+            with self._lock:
+                self._pending_counts[event.name] -= 1
+                if self._pending_counts[event.name] == 0:
+                    del self._pending_counts[event.name]
+
+    # ------------------------------------------------------------------
+    # تنفيذ المستمعين
+    # ------------------------------------------------------------------
+    def _run_sync_handler(self, handler: Callable, event: Event) -> None:
+        """تنفيذ المستمع المتزامن – استثناءاته لا تُحجب غيرها."""
+        start = time.time()
+        try:
+            handler(event)
+            self._log_audit(event, handler, start, success=True)
         except Exception as e:
-            logger.error(f"Condition handler '{condition}' failed: {e}")
-            return False
-        
-    #---------------------------------
-    #  الطرق العامة
-    #---------------------------------
-    def can(self,
-            user_id: uuid.UUID,
-            action: str,
-            resource: str,
-            context: Optional[Dict[str, Any]] = None) -> bool:
-        """
-            تحديد ما إذا كان المستخدم يملك صلاحية لتنفيذ action على resource.
-            يمكن تمرير سياق إضافي (مثل كائن المورد) لتقييم الشروط.
-        """
-        #1. جلب دور المستخدم مع تخزين مؤقت(cache)
-        role_id = self._get_user_role(user_id)
-        if not role_id:
-            logger.debug(f"User {user_id} has no role -> denied")
-            return False    
-        
-        #2. جلب السياسات من قاعدة البيانات مع تخزين مؤقت(cache) 
-        policies = self._load_policies(role_id, action, resource)
+            self._log_audit(event, handler, start, success=False, error=e)
+            logger.error(f"Sync handler {self._handler_name(handler)} for {event.name} failed: {e}")
+            # لا نعيد رفع الاستثناء لتجنب تعطيل المتزامنين الآخرين
 
-        #3. تجهيز السياق الكامل
-        full_context = {
-            'user': {'id': user_id, 'role_id': role_id},
-            'resource': context or {}
-        }
-        #4. تقييم السياسات حسب الأولوية
-        for policy in policies:
-            condition = policy.get('condition')
-            if self._evaluate_condition(condition, full_context):
-                effect = policy['effect']
-                logger.debug(f"User {user_id} (role {role_id}) {action} {resource} -> {effect} (condition = {condition})")
-                if effect == 'allow':
-                    return True
-                elif effect == 'deny':
-                    return False
-                    # أي effect آخر غير متوقع نكمل
-        #5. إذا لم تطابق أي سياسة -> رفض آمن
-        logger.debug(f"User {user_id} (role {role_id}) {action} {resource} -> DENIED (no matching policy)")
-        return False
-    
-    def enforce(self,
-                user_id: uuid.UUID,
-                action: str,
-                resource: str,
-                context:  Optional[Dict[str, Any]] = None) -> None:
-        """ رفع الإستثناء إدا لم تكن الصلاحية متاحة"""
-        if not self.can(user_id, action, resource, context):
-            raise PermissionDenied(f"User {user_id} is not allowed to {action} on {resource}")
-        
-    def invalidate_cache(self, role_id: Optional[uuid.UUID] = None) -> None:
-        """ إلغاء صلاحية الكاش لسياسات دور معين أو للجميع """
-        with self._cache_lock:
-            if role_id is None:
-                self._cache.clear()
-                logger.info("Policy cache cleared entirely.")
-            else:
-                keys_to_delete = [k for k in self._cache if k.startswith(f"{role_id}:")]
-                for key in keys_to_delete:
-                    del self._cache[key]
-                logger.info(f"PolicyEngine cache cleared for role_id {role_id}.")
+    def _run_async_handler(self, handler: Callable, event: Event) -> None:
+        """تنفيذ المستمع غير المتزامن مع إعادة المحاولة."""
+        attempt = 0
+        last_error = None
+        while attempt < self.DEFAULT_RETRY_ATTEMPTS:
+            start = time.time()
+            try:
+                handler(event)
+                self._log_audit(event, handler, start, success=True)
+                return
+            except Exception as e:
+                last_error = e
+                duration = time.time() - start
+                logger.error(f"Async handler {self._handler_name(handler)} for {event.name} "
+                             f"attempt {attempt+1} failed after {duration:.3f}s: {e}")
+                attempt += 1
+                if attempt < self.DEFAULT_RETRY_ATTEMPTS:
+                    wait = self.DEFAULT_RETRY_BACKOFF * (2 ** (attempt - 1))
+                    logger.info(f"Retrying in {wait:.2f}s...")
+                    time.sleep(wait)
 
-    def invalidate_user_role_cache(self,  user_id: Optional[uuid.UUID] = None) -> None:
-        """ إلغاء صلاحية الكاش لدور مستخدم معين أو للجميع """
-        with self._user_role_lock:
-            if user_id is None:
-                self._user_role_cache.clear()
-                logger.info("User role cache cleared entirely.")
-            else:
-                self._user_role_cache.pop(str(user_id), None)
-                logger.info(f"User role cache cleared for user {user_id}.")
+        # جميع المحاولات فشلت
+        self._log_audit(event, handler, start, success=False, error=last_error, retries=attempt)
+        self._dead_letter.append((event, last_error))
+        logger.critical(f"Async handler {self._handler_name(handler)} for {event.name} "
+                        f"failed after {self.DEFAULT_RETRY_ATTEMPTS} attempts; moved to dead letter.")
 
+    # ------------------------------------------------------------------
+    # أدوات مساعدة
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _handler_name(handler: Callable) -> str:
+        """استخراج اسم المستمع بأمان (يتعامل مع lambda و partial)."""
+        if hasattr(handler, '__name__'):
+            return handler.__name__
+        if hasattr(handler, 'func'):  # partial
+            return handler.func.__name__
+        return str(handler)
 
-#------------------------------------------------    
-# وظائف مساعدة للمعالجات (تعريفها خارج الكلاس لتجنب القيود)
-#------------------------------------------------
-def _is_own_patient(context: Dict[str, Any]) -> bool:
-    """ الشرط:المستخدم هو المريض نفسه"""
-    user = context.get('user', {})
-    resource = context.get('resource', {})
-    return user.get('id') == resource.get('patient_id')
+    def _log_audit(self, event: Event, handler: Callable, start: float,
+                   success: bool, error: Exception = None, retries: int = 0) -> None:
+        """تسجيل تفاصيل تنفيذ المستمع في سجل التدقيق."""
+        duration = time.time() - start
+        status = "SUCCESS" if success else "FAILURE"
+        self._audit_log.append({
+            "event_id": event.id,
+            "event_name": event.name,
+            "handler": self._handler_name(handler),
+            "duration": duration,
+            "status": status,
+            "error": str(error) if error else None,
+            "retries": retries,
+            "timestamp": time.time()
+        })
+        if duration > 1.0:  # أكثر من ثانية
+            logger.warning(f"Handler {self._handler_name(handler)} took {duration:.2f}s for {event.name}")
 
-def _is_assigned_doctor(context: Dict[str, Any]) -> bool:
-    """الشرط:المستخدم هو الطبيب المعالج"""
-    user = context.get('user', {})
-    resource = context.get('resource', {})
-    return user.get('id') == resource.get('doctor_id')
+    # ------------------------------------------------------------------
+    # إدارة الإغلاق
+    # ------------------------------------------------------------------
+    def shutdown(self, wait: bool = True) -> None:
+        """إيقاف تجمع الخيوط وتنظيف الموارد."""
+        self._executor.shutdown(wait=wait)
+        with self._lock:
+            self._sync_listeners.clear()
+            self._async_listeners.clear()
+            self._pending_counts.clear()
+        logger.info("EventBus shutdown complete.")
 
-def _is_today_only(context: Dict[str, Any]) -> bool:
-    """
-        الشرط: التاريخ في المورد يساوي تاريخ اليوم.
-        ملاحظة: إذا لم يكن هناك مورد، نرفض (لأنه لا يمكن التحقق).
-        يجب تمرير مورد يحتوي على appointment_datetime.
-    """
-    resource = context.get('resource')
-    if not resource:
-        return False
-    
-    appt_datetime = resource.get('appointment_datetime')
-    if not appt_datetime:
-        return False
-    
-    # توحيد المتغير لتخزين التاريخ
-    if isinstance(appt_datetime, str):
-        try:
-            appt_date = datetime.fromisoformat(appt_datetime).date()
-        except ValueError:
-            return False
-    elif isinstance(appt_datetime, datetime):
-        appt_date = appt_datetime.date()
-    else:
-        return False
-    
-    today = date.today()
-    return appt_date == today
+    # ------------------------------------------------------------------
+    # طرق للاختبار والمراقبة
+    # ------------------------------------------------------------------
+    def get_dead_letter(self) -> List[Tuple[Event, Exception]]:
+        """إرجاع قائمة الأحداث الفاشلة (للمراقبة)."""
+        return self._dead_letter.copy()
 
-def _is_for_patient(context: Dict[str, Any]) -> bool:
-    """الشرط: المورد يحتوي على patient_id (اي انه مرتبط بمريض)"""
-    resource = context.get('resource', {})
-    return resource.get('patient_id') is not None
+    def get_audit_log(self) -> List[Dict]:
+        """إرجاع سجل التدقيق (للتطبيقات)."""
+        return self._audit_log.copy()
 
-def _is_future_only(context: Dict[str, Any]) -> bool:
-    """  
-        الشرط: التاريخ في المورد (مثلاً slot_date) هو في المستقبل (>= اليوم).
-        إذا لم يوجد slot_date، يتم الرفض.
-    """
-    resource = context.get('resource', {})
-    slot_date = resource.get('slot_date')
-    if not slot_date:
-        return False
-
-    if isinstance(slot_date, str):
-        try:
-            slot_date = datetime.fromisoformat(slot_date).date()
-        except ValueError:
-            return False
-    elif isinstance(slot_date, datetime):
-        slot_date = slot_date.date()
-    else:
-        return False
-
-    today = date.today()
-    return slot_date >= today
+    def clear_audit_log(self) -> None:
+        """مسح سجل التدقيق."""
+        self._audit_log.clear()
 
 
-# ------------------------------------------------------------------
-# Singleton instance – يُستخدم في جميع أنحاء التطبيق
-# ------------------------------------------------------------------
-policy_engine = PolicyEngine()
+# ------------------------------------------------------------
+# Singleton للمشروع – لكن يمكن إنشاء كائنات منفصلة للاختبار
+# ------------------------------------------------------------
+_event_bus_instance = None
+
+def get_event_bus(max_workers: int = 10) -> EventBus:
+    global _event_bus_instance
+    if _event_bus_instance is None:
+        _event_bus_instance = EventBus(max_workers=max_workers)
+    return _event_bus_instance

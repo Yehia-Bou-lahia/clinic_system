@@ -1,4 +1,3 @@
-#from multiprocessing import context
 import uuid
 import time 
 import logging
@@ -61,8 +60,8 @@ class PolicyEngine:
         with db.get_cursor() as cursor:
             cursor.execute("SELECT role_id FROM users WHERE id = %s", (user_id,))
             row = cursor.fetchone()
-            role_id = row['role_id'] if row else None  # تم التصحيح
-
+            role_id = row['role_id'] if row else None  
+            
         with self._user_role_lock:
             if role_id is not None:
                 self._user_role_cache[cache_key] = (role_id, now)

@@ -1,51 +1,62 @@
-# أخطاء قاعدة البيانات
+# core/exceptions.py
+
+# قاعدة لأخطاء قاعدة البيانات
 class DatabaseError(Exception):
     pass
 
+# أخطاء قاعدة البيانات (تنشأ من الـ Repository)
 class ConnectionError(DatabaseError):
     pass
 
-# أخطاء المستخدم
-class UserNotFoundError(Exception):
+class UserNotFoundError(DatabaseError):
     pass
 
-class AccountDisabledError(Exception):
+class DuplicateEmailError(DatabaseError):
     pass
 
-class DuplicateEmailError(Exception):
+class PatientNotFoundError(DatabaseError):
     pass
 
-class AuthenticationError(Exception):
+class PatientProfileAlreadyExistsError(DatabaseError):
     pass
 
-class PatientNotFoundError(Exception):
-    pass
-
-class PatientProfileAlreadyExistsError(Exception):
-    pass
 class DoctorNotFoundError(DatabaseError):
-    """Raised when a doctor profile is not found"""
     pass
 
 class DuplicateLicenseError(DatabaseError):
-    """Raised when trying to create a doctor with an existing license number"""
     pass
+
 class AppointmentNotFoundError(DatabaseError):
-    """Raised when an appointment is not found"""
     pass
 
 class AppointmentConflictError(DatabaseError):
-    """Raised when trying to book an already taken slot"""
     pass
 
 class InvalidAppointmentStatusError(DatabaseError):
-    """Raised when trying to change to an invalid status"""
     pass
 
 class VisitReportNotFoundError(DatabaseError):
-    """Raised when a visit report is not found"""
     pass
 
 class VisitReportAlreadyExistsError(DatabaseError):
-    """Raised when trying to create a report for an appointment that already has one"""
+    pass
+
+# أخطاء منطق الأعمال (تنشأ من الـ Service أو Policy)
+class PermissionDenied(Exception):
+    """Raised when a user is not allowed to perform an action"""
+    pass
+
+class DoctorNotAvailableError(Exception):
+    """Raised when a doctor is not available for a given time slot"""
+    pass
+
+class BookingLimitError(Exception):
+    """Raised when a patient exceeds the maximum number of pending appointments"""
+    pass
+
+# قد تُستخدم لاحقاً
+class AccountDisabledError(Exception):
+    pass
+
+class AuthenticationError(Exception):
     pass

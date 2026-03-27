@@ -1,3 +1,4 @@
+import datetime
 import uuid
 # في أعلى ملف conftest.py
 import os
@@ -176,3 +177,24 @@ class DoctorRepository:
         with db.get_cursor() as cursor:
             cursor.execute(query, (limit, offset))
             return cursor.fetchall()
+        
+    @staticmethod
+    def is_available(doctor_id: uuid.UUID, datetime: datetime) -> bool:
+        """
+            التحقق من توفر الطبيب في وقت معين.
+            - لا توجد مواعيد محجوزة في نفس الوقت (باستثناء الملغاة).
+            - يمكن إضافة التحقق من جدول العمل (schedules) لاحقاً.
+        """
+        with db.get_cursor() as cursor:
+            # التحقق من المواعيد المحجوزة الغير الملغات
+            cursor.execute("""
+                           SELECT 1 FROM appointments
+                           WHERE doctor_id = %s
+                            AND appointment_datetime = %s
+                            AND status NOT IN ('CANCELLED_BY_DOCTOR', 'CANCELLED_BY_PATIENT', 
+                                'CANCELLED_AUTO', 'NO_SHOW' ) 
+                        """, (doctor_id, datetime))
+            if cursor.fetchone():
+                return False
+            # TODO: التحقق من جدول العمل (schedules) إذا تم تنفيذه
+            return True

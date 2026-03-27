@@ -28,7 +28,7 @@ clinic_project/clinic_project/settings.py/
 
 # Environment variables
 .env
-
+.env.test
 # Database dumps
 *.dump
 *.sql.gz

@@ -3,6 +3,9 @@
 # قاعدة لأخطاء قاعدة البيانات
 class DatabaseError(Exception):
     pass
+class RoleNotFoundError(DatabaseError):
+    """Raised when a role does not exist in the database"""
+    pass
 
 # أخطاء قاعدة البيانات (تنشأ من الـ Repository)
 class ConnectionError(DatabaseError):
@@ -60,3 +63,7 @@ class AccountDisabledError(Exception):
 
 class AuthenticationError(Exception):
     pass
+class RoleNotFoundError(DatabaseError):
+    """Raised when a role does not exist in the database"""
+    pass
+

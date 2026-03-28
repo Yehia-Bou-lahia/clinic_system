@@ -1,6 +1,6 @@
-# Clinic Management System
+# ClinicOS
 
-A professional clinic management system designed for medical clinics, built with a focus on clean architecture, security, and scalability.
+A professional ClinicOS system designed for medical clinics, built with a focus on clean architecture, security, and scalability.
 
 ## About
 This system digitizes and streamlines clinic operations including patient management, doctor scheduling, appointment booking, medical records, and billing — all in one integrated platform. It is built as a **modular, secure, and production-ready backend** that can be tailored to the needs of real clinics.

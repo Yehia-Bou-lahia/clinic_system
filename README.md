@@ -26,12 +26,12 @@ This system digitizes and streamlines clinic operations including patient manage
 
 ###  Security & Access Control
 - **PolicyEngine** – rule-based access control (ABAC) with pre-defined condition handlers (e.g., `is_own_patient`, `is_assigned_doctor`). Policies are stored in the database and evaluated in memory with TTL cache.
-- **bcrypt password hashing** with salt (12 rounds) for user passwords.
+- **bcrypt password hashing** with salt for user passwords.
 - **Timing attack protection** in authentication (constant-time check with dummy hash).
 - **Soft delete** (`deleted_at` column) for all critical tables – data is never permanently removed through the application.
 
 ###  Business Logic (Service Layer)
-- **UserService** – registration, login, profile management, password change with strong validation (email format, password strength, phone number validation using `phonenumbers`, restricted to Gulf countries).
+- **UserService** – registration, login, profile management, password change with strong validation (email format, password strength, phone number validation using `phonenumbers`).
 - **BookingService** – create, confirm, cancel, reschedule appointments; checks doctor availability (including schedule and breaks) and patient booking limits.
 - **EventBus** – asynchronous event publishing/subscribing (in-memory) to decouple services (e.g., `BookingService` publishes `appointment.created`, `NotificationService` listens to it).
 - **Repository pattern** – all data access is encapsulated in repository classes (e.g., `UserRepository`, `DoctorRepository`, `AppointmentRepository`).

@@ -179,22 +179,62 @@ class DoctorRepository:
             return cursor.fetchall()
         
     @staticmethod
-    def is_available(doctor_id: uuid.UUID, datetime: datetime) -> bool:
+    def is_available(doctor_id: uuid.UUID, appointment_datetime: datetime) -> bool:
         """
-            التحقق من توفر الطبيب في وقت معين.
-            - لا توجد مواعيد محجوزة في نفس الوقت (باستثناء الملغاة).
-            - يمكن إضافة التحقق من جدول العمل (schedules) لاحقاً.
+        التحقق من توفر الطبيب في وقت معين.
+        - يعمل في هذا اليوم والوقت حسب جدول العمل.
+        - لا توجد مواعيد محجوزة في نفس الوقت.
         """
         with db.get_cursor() as cursor:
-            # التحقق من المواعيد المحجوزة الغير الملغات
-            cursor.execute("""
-                           SELECT 1 FROM appointments
-                           WHERE doctor_id = %s
-                            AND appointment_datetime = %s
-                            AND status NOT IN ('CANCELLED_BY_DOCTOR', 'CANCELLED_BY_PATIENT', 
-                                'CANCELLED_AUTO', 'NO_SHOW' ) 
-                        """, (doctor_id, datetime))
+            # 1. التحقق من وجود جدول عمل مناسب للطبيب في هذا اليوم
+            day_of_week = appointment_datetime.weekday()  # 0=Monday, 6=Sunday
+            query_schedule = """
+                SELECT 1 FROM schedules
+                WHERE doctor_id = %s
+                  AND day_of_week = %s
+                  AND start_time <= %s
+                  AND end_time >= %s
+                  AND is_working_day = true
+                  AND (valid_from IS NULL OR valid_from <= %s)
+                  AND (valid_to IS NULL OR valid_to >= %s)
+            """
+            cursor.execute(query_schedule, (
+                doctor_id, day_of_week,
+                appointment_datetime.time(), appointment_datetime.time(),
+                appointment_datetime.date(), appointment_datetime.date()
+            ))
+            if not cursor.fetchone():
+                return False
+        
+            # 2. التحقق من عدم وجود موعد محجوز في نفس الوقت (باستثناء الملغاة)
+            query_appointment = """
+                SELECT 1 FROM appointments
+                WHERE doctor_id = %s
+                  AND appointment_datetime = %s
+                  AND status NOT IN ('CANCELLED_BY_PATIENT','CANCELLED_BY_DOCTOR','CANCELLED_AUTO','NO_SHOW')
+            """
+            cursor.execute(query_appointment, (doctor_id, appointment_datetime))
             if cursor.fetchone():
                 return False
-            # TODO: التحقق من جدول العمل (schedules) إذا تم تنفيذه
+        
+            # 3. (اختياري) التحقق من فترة الاستراحة (break)
+            # نأخذ جدول العمل الذي انطبق عليه لمعرفة break_start و break_end
+            cursor.execute("""
+                SELECT break_start, break_end FROM schedules
+                WHERE doctor_id = %s
+                  AND day_of_week = %s
+                  AND start_time <= %s
+                  AND end_time >= %s
+                  AND is_working_day = true
+                  AND (valid_from IS NULL OR valid_from <= %s)
+                  AND (valid_to IS NULL OR valid_to >= %s)
+                LIMIT 1
+            """, (doctor_id, day_of_week,
+                  appointment_datetime.time(), appointment_datetime.time(),
+                  appointment_datetime.date(), appointment_datetime.date()))
+            schedule = cursor.fetchone()
+            if schedule and schedule['break_start'] and schedule['break_end']:
+                if schedule['break_start'] <= appointment_datetime.time() <= schedule['break_end']:
+                    return False
+        
             return True

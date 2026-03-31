@@ -2,6 +2,7 @@ import uuid
 from datetime import date
 from typing import Optional, Dict, Any, List
 from psycopg2 import IntegrityError
+from psycopg2.extras import RealDictCursor
 from database.connection import db
 from core.exceptions import (
     DatabaseError,
@@ -32,6 +33,25 @@ class VisitReportRepository:
     """التعامل مع جدول visit_reports"""
 
     @staticmethod
+    def _execute_create(cursor, appointment_id, patient_id, doctor_id,
+                        diagnosis, prescription, lab_tests, radiology,
+                        notes, follow_up_date):
+        """تنفيذ INSERT مشترك."""
+        query = f"""
+        INSERT INTO visit_reports (
+            appointment_id, patient_id, doctor_id, diagnosis,
+            prescription, lab_tests, radiology, notes, follow_up_date
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING {VISIT_REPORT_ACTIVE_COLUMNS};
+        """
+        cursor.execute(query, (
+            appointment_id, patient_id, doctor_id, diagnosis,
+            prescription, lab_tests, radiology, notes, follow_up_date
+        ))
+        return cursor.fetchone()
+
+    @staticmethod
     def create_visit_report(
         appointment_id: uuid.UUID,
         patient_id: uuid.UUID,
@@ -41,7 +61,8 @@ class VisitReportRepository:
         lab_tests: Optional[str] = None,
         radiology: Optional[str] = None,
         notes: Optional[str] = None,
-        follow_up_date: Optional[date] = None
+        follow_up_date: Optional[date] = None,
+        conn: Optional[Any] = None,   # ← معامل اختياري للمعاملة
     ) -> Dict[str, Any]:
         """
         إنشاء تقرير زيارة جديد (نشط).
@@ -49,30 +70,30 @@ class VisitReportRepository:
         if not appointment_id or not patient_id or not doctor_id or not diagnosis:
             raise ValueError("appointment_id, patient_id, doctor_id, and diagnosis are required")
 
-        query = f"""
-        INSERT INTO visit_reports (
-            appointment_id, patient_id, doctor_id, diagnosis,
-            prescription, lab_tests, radiology, notes, follow_up_date
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-        RETURNING {VISIT_REPORT_ACTIVE_COLUMNS};
-        """
-        with db.get_cursor() as cursor:
-            try:
-                cursor.execute(query, (
-                    appointment_id, patient_id, doctor_id, diagnosis,
-                    prescription, lab_tests, radiology, notes, follow_up_date
-                ))
-                result = cursor.fetchone()
-                if not result:
-                    raise DatabaseError("Failed to create visit report")
-                return result
-            except IntegrityError as e:
-                if 'unique constraint' in str(e).lower():
-                    raise VisitReportAlreadyExistsError(
-                        f"Report for appointment {appointment_id} already exists"
+        try:
+            if conn:
+                cursor = conn.cursor(cursor_factory=RealDictCursor)
+                result = VisitReportRepository._execute_create(
+                    cursor, appointment_id, patient_id, doctor_id,
+                    diagnosis, prescription, lab_tests, radiology,
+                    notes, follow_up_date
+                )
+            else:
+                with db.get_cursor() as cursor:
+                    result = VisitReportRepository._execute_create(
+                        cursor, appointment_id, patient_id, doctor_id,
+                        diagnosis, prescription, lab_tests, radiology,
+                        notes, follow_up_date
                     )
-                raise
+            if not result:
+                raise DatabaseError("Failed to create visit report")
+            return result
+        except IntegrityError as e:
+            if 'unique constraint' in str(e).lower():
+                raise VisitReportAlreadyExistsError(
+                    f"Report for appointment {appointment_id} already exists"
+                )
+            raise
 
     @staticmethod
     def get_report_by_id(report_id: uuid.UUID) -> Optional[Dict[str, Any]]:

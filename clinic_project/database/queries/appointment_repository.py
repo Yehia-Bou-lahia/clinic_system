@@ -358,3 +358,18 @@ class AppointmentRepository:
             """, (patient_id,))
             row = cursor.fetchone()
             return row['cnt'] if row else 0
+        
+    @staticmethod
+    def count_future_by_doctor(doctor_id: uuid.UUID) -> int:
+        """عدد المواعيد المستقبلية (غير الملغاة) لطبيب معين."""
+        with db.get_cursor() as cursor:
+            cursor.execute("""
+                SELECT COUNT(*) as cnt FROM appointments
+                WHERE doctor_id = %s
+                  AND appointment_datetime > CURRENT_TIMESTAMP
+                  AND status NOT IN ('CANCELLED_BY_PATIENT','CANCELLED_BY_DOCTOR','CANCELLED_AUTO','NO_SHOW')
+                """, (doctor_id,))
+            row = cursor.fetchone()
+            return row['cnt'] if row else 0
+
+    

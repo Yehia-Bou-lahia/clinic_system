@@ -1,12 +1,8 @@
 import datetime
 import uuid
-# في أعلى ملف conftest.py
-import os
-from dotenv import load_dotenv
-load_dotenv('.env.test')
-print(f"🔍 DB_NAME used by tests: {os.getenv('DB_NAME')}")
 from typing import List, Optional, Dict, Any
 from psycopg2 import IntegrityError
+from psycopg2.extras import RealDictCursor
 from database.connection import db
 from core.exceptions import (
     DatabaseError,
@@ -31,6 +27,29 @@ _SELECT_DOCTOR_FIELDS = """
 
 class DoctorRepository:
     @staticmethod
+    def _execute_create(cursor, user_id, specialty, sub_specialty,
+                        license_number, consultation_fee,
+                        years_experience, is_active):
+        """تنفيذ INSERT مشترك."""
+        query = """
+            INSERT INTO doctor_profiles (
+                id, user_id, specialty, sub_specialty,
+                license_number, consultation_fee, years_experience,
+                is_active, deleted_at
+            )
+            VALUES (gen_random_uuid(), %s, %s, %s, %s, %s, %s, %s, NULL)
+            RETURNING id, user_id, specialty, sub_specialty,
+                license_number, consultation_fee, years_experience,
+                is_active, created_at, updated_at;
+        """
+        cursor.execute(query, (
+            user_id, specialty, sub_specialty,
+            license_number, consultation_fee,
+            years_experience, is_active
+        ))
+        return cursor.fetchone()
+
+    @staticmethod
     def create_doctor_profile(
         user_id: uuid.UUID,
         specialty: str,
@@ -38,7 +57,8 @@ class DoctorRepository:
         consultation_fee: float,
         sub_specialty: Optional[str] = None,
         years_experience: int = 0,
-        is_active: bool = True
+        is_active: bool = True,
+        conn: Optional[Any] = None,   # ← معامل اختياري للمعاملة
     ) -> Dict[str, Any]:
         if not user_id:
             raise ValueError("user_id is required")
@@ -51,49 +71,54 @@ class DoctorRepository:
         if years_experience < 0:
             raise ValueError("years_experience cannot be negative")
 
-        query = """
-            INSERT INTO doctor_profiles (
-                id, user_id, specialty, sub_specialty,
-                license_number, consultation_fee, years_experience,
-                is_active, deleted_at
-            )
-            VALUES (gen_random_uuid(), %s, %s, %s, %s, %s, %s, %s, NULL)
-            RETURNING id, user_id, specialty, sub_specialty,
-                license_number, consultation_fee, years_experience,
-                is_active, created_at, updated_at;
-        """
-        with db.get_cursor() as cursor:
-            try:
-                cursor.execute(query, (
-                    user_id, specialty, sub_specialty,
+        try:
+            if conn:
+                cursor = conn.cursor(cursor_factory=RealDictCursor)
+                result = DoctorRepository._execute_create(
+                    cursor, user_id, specialty, sub_specialty,
                     license_number, consultation_fee,
                     years_experience, is_active
-                ))
-                result = cursor.fetchone()
-                if not result:
-                    raise DatabaseError("Failed to create doctor profile")
-                return result
-            except IntegrityError as e:
-                if 'foreign key constraint' in str(e).lower():
-                    raise UserNotFoundError(f"User with id {user_id} does not exist")
-                if 'license_number' in str(e).lower():
-                    raise DuplicateLicenseError(f"Doctor with license number {license_number} already exists")
-                raise
-        
+                )
+            else:
+                with db.get_cursor() as cursor:
+                    result = DoctorRepository._execute_create(
+                        cursor, user_id, specialty, sub_specialty,
+                        license_number, consultation_fee,
+                        years_experience, is_active
+                    )
+            if not result:
+                raise DatabaseError("Failed to create doctor profile")
+            return result
+        except IntegrityError as e:
+            if 'foreign key constraint' in str(e).lower():
+                raise UserNotFoundError(f"User with id {user_id} does not exist")
+            if 'license_number' in str(e).lower():
+                raise DuplicateLicenseError(f"Doctor with license number {license_number} already exists")
+            raise
 
     @staticmethod
-    def get_doctor_by_user_id(user_id: uuid.UUID) -> Optional[Dict[str, Any]]:
+    def get_doctor_by_user_id(user_id: uuid.UUID, conn: Optional[Any] = None) -> Optional[Dict[str, Any]]:
         query = _SELECT_DOCTOR_FIELDS + " WHERE user_id = %s AND deleted_at IS NULL;"
-        with db.get_cursor() as cursor:
+        if conn:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
             cursor.execute(query, (user_id,))
-            return cursor.fetchone()   # تعيد None إذا لم يوجد
+            return cursor.fetchone()
+        else:
+            with db.get_cursor() as cursor:
+                cursor.execute(query, (user_id,))
+                return cursor.fetchone()
 
     @staticmethod
-    def get_doctor_by_id(doctor_id: uuid.UUID) -> Optional[Dict[str, Any]]:
+    def get_doctor_by_id(doctor_id: uuid.UUID, conn: Optional[Any] = None) -> Optional[Dict[str, Any]]:
         query = _SELECT_DOCTOR_FIELDS + " WHERE id = %s AND deleted_at IS NULL;"
-        with db.get_cursor() as cursor:
+        if conn:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
             cursor.execute(query, (doctor_id,))
-            return cursor.fetchone()   # تعيد None إذا لم يوجد
+            return cursor.fetchone()
+        else:
+            with db.get_cursor() as cursor:
+                cursor.execute(query, (doctor_id,))
+                return cursor.fetchone()
 
     @staticmethod
     def update_doctor_profile(
@@ -101,7 +126,6 @@ class DoctorRepository:
         **fields: Any
     ) -> Dict[str, Any]:
         if not fields:
-            # إذا لم توجد حقول، نعيد الملف الحالي
             doctor = DoctorRepository.get_doctor_by_id(doctor_id)
             if not doctor:
                 raise DoctorNotFoundError(f"Doctor profile with id {doctor_id} not found")
@@ -177,7 +201,7 @@ class DoctorRepository:
         with db.get_cursor() as cursor:
             cursor.execute(query, (limit, offset))
             return cursor.fetchall()
-        
+
     @staticmethod
     def is_available(doctor_id: uuid.UUID, appointment_datetime: datetime) -> bool:
         """
@@ -205,7 +229,7 @@ class DoctorRepository:
             ))
             if not cursor.fetchone():
                 return False
-        
+
             # 2. التحقق من عدم وجود موعد محجوز في نفس الوقت (باستثناء الملغاة)
             query_appointment = """
                 SELECT 1 FROM appointments
@@ -216,9 +240,8 @@ class DoctorRepository:
             cursor.execute(query_appointment, (doctor_id, appointment_datetime))
             if cursor.fetchone():
                 return False
-        
+
             # 3. (اختياري) التحقق من فترة الاستراحة (break)
-            # نأخذ جدول العمل الذي انطبق عليه لمعرفة break_start و break_end
             cursor.execute("""
                 SELECT break_start, break_end FROM schedules
                 WHERE doctor_id = %s
@@ -236,5 +259,5 @@ class DoctorRepository:
             if schedule and schedule['break_start'] and schedule['break_end']:
                 if schedule['break_start'] <= appointment_datetime.time() <= schedule['break_end']:
                     return False
-        
+
             return True

@@ -57,10 +57,10 @@ class EventBus:
     # ------------------------------------------------------------------
     def subscribe(self, event_name: str, handler: Callable, sync: bool = False) -> Callable[[], None]:
         """
-        تسجيل مستمع لحدث معين.
-        إذا sync = True → ينفذ في نفس الخيط (حجب).
-        إذا sync = False → ينفذ في تجمع الخيوط (غير حجب).
-        تعيد دالة يمكن استدعاؤها لإلغاء الاشتراك.
+            تسجيل مستمع لحدث معين.
+            إذا sync = True → ينفذ في نفس الخيط (حجب).
+            إذا sync = False → ينفذ في تجمع الخيوط (غير حجب).
+            تعيد دالة يمكن استدعاؤها لإلغاء الاشتراك.
         """
         with self._lock:
             listeners = self._sync_listeners if sync else self._async_listeners
@@ -135,7 +135,8 @@ class EventBus:
         """تنفيذ المستمع المتزامن – استثناءاته لا تُحجب غيرها."""
         start = time.time()
         try:
-            handler(event)
+            # تمرير الـ payload فقط للتوافق مع الخدمات الحالية
+            handler(event.payload)
             self._log_audit(event, handler, start, success=True)
         except Exception as e:
             self._log_audit(event, handler, start, success=False, error=e)
@@ -149,7 +150,7 @@ class EventBus:
         while attempt < self.DEFAULT_RETRY_ATTEMPTS:
             start = time.time()
             try:
-                handler(event)
+                handler(event.payload)
                 self._log_audit(event, handler, start, success=True)
                 return
             except Exception as e:

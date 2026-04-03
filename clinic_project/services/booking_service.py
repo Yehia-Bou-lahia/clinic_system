@@ -1,8 +1,10 @@
+# services/booking_service.py
 import uuid
 import logging
 from datetime import datetime
 from typing import Optional, Dict, Any
 
+from database.connection import db
 from database.queries.appointment_repository import AppointmentRepository
 from database.queries.doctor_repository import DoctorRepository
 from database.queries.patient_repository import PatientRepository
@@ -30,12 +32,22 @@ class BookingService:
     VALID_CANCELLED_BY = {'patient', 'doctor', 'auto'}
     MAX_REASON_LENGTH = 500
     MAX_NOTES_LENGTH = 1000
+    MAX_LIST_LIMIT = 100
 
-    def __init__(self, feature_flag_service=None):
-        self.appointment_repo = AppointmentRepository()
-        self.doctor_repo = DoctorRepository()
-        self.patient_repo = PatientRepository()
-        self.event_bus = get_event_bus()
+    def __init__(
+        self,
+        appointment_repo=None,
+        doctor_repo=None,
+        patient_repo=None,
+        policy_engine=policy_engine,
+        event_bus=None,
+        feature_flag_service=None,
+    ):
+        self.appointment_repo = appointment_repo or AppointmentRepository()
+        self.doctor_repo = doctor_repo or DoctorRepository()
+        self.patient_repo = patient_repo or PatientRepository()
+        self.policy_engine = policy_engine
+        self.event_bus = event_bus or get_event_bus()
         self.feature_flags = feature_flag_service or get_feature_flag_service()
 
     # ========================================
@@ -88,7 +100,7 @@ class BookingService:
 
         # 1. صلاحية
         try:
-            policy_engine.enforce(user_id, 'create_appointment', 'appointment')
+            self.policy_engine.enforce(user_id, 'create_appointment', 'appointment')
         except PermissionDenied as e:
             logger.warning(f"User {user_id} denied to create appointment: {e}")
             raise
@@ -110,13 +122,15 @@ class BookingService:
         if not patient or not doctor:
             raise ValueError("Patient or doctor profile not found")
 
-        # 5. إنشاء الموعد
-        appointment = self.appointment_repo.create_appointment(
-            patient_id=patient_id,
-            doctor_id=doctor_id,
-            appointment_datetime=appointment_datetime,
-            notes=notes,
-        )
+        # 5. إنشاء الموعد (ضمن معاملة)
+        with db.get_connection() as conn:
+            appointment = self.appointment_repo.create_appointment(
+                patient_id=patient_id,
+                doctor_id=doctor_id,
+                appointment_datetime=appointment_datetime,
+                notes=notes,
+                conn=conn,
+            )
 
         # 6. نشر الحدث
         self.event_bus.publish('appointment.created', {
@@ -140,7 +154,7 @@ class BookingService:
 
         context = {'resource': appointment}
         try:
-            policy_engine.enforce(user_id, 'confirm_appointment', 'appointment', context)
+            self.policy_engine.enforce(user_id, 'confirm_appointment', 'appointment', context)
         except PermissionDenied as e:
             logger.warning(f"User {user_id} denied to confirm appointment {appointment_id}: {e}")
             raise
@@ -175,7 +189,7 @@ class BookingService:
 
         context = {'resource': appointment}
         try:
-            policy_engine.enforce(user_id, 'cancel_appointment', 'appointment', context)
+            self.policy_engine.enforce(user_id, 'cancel_appointment', 'appointment', context)
         except PermissionDenied as e:
             logger.warning(f"User {user_id} denied to cancel appointment {appointment_id}: {e}")
             raise
@@ -204,7 +218,7 @@ class BookingService:
         """إعادة جدولة الموعد (تغيير الوقت)."""
         # التحقق من تاريخ الموعد الجديد
         self._validate_appointment_datetime(new_datetime)
-        self._validate_reason(reason)  # يمكن أن يكون السبب إلزامياً أو اختيارياً حسب المتطلبات
+        self._validate_reason(reason)
 
         appointment = self.appointment_repo.get_appointment_by_id(appointment_id)
         if not appointment:
@@ -212,7 +226,7 @@ class BookingService:
 
         context = {'resource': appointment}
         try:
-            policy_engine.enforce(user_id, 'reschedule_appointment', 'appointment', context)
+            self.policy_engine.enforce(user_id, 'reschedule_appointment', 'appointment', context)
         except PermissionDenied as e:
             logger.warning(f"User {user_id} denied to reschedule appointment {appointment_id}: {e}")
             raise
@@ -241,7 +255,7 @@ class BookingService:
 
         context = {'resource': appointment}
         try:
-            policy_engine.enforce(user_id, 'check_in', 'appointment', context)
+            self.policy_engine.enforce(user_id, 'check_in', 'appointment', context)
         except PermissionDenied as e:
             logger.warning(f"User {user_id} denied to check-in appointment {appointment_id}: {e}")
             raise
@@ -266,7 +280,7 @@ class BookingService:
 
         context = {'resource': appointment}
         try:
-            policy_engine.enforce(user_id, 'complete_appointment', 'appointment', context)
+            self.policy_engine.enforce(user_id, 'complete_appointment', 'appointment', context)
         except PermissionDenied as e:
             logger.warning(f"User {user_id} denied to complete appointment {appointment_id}: {e}")
             raise
@@ -291,7 +305,7 @@ class BookingService:
 
         context = {'resource': appointment}
         try:
-            policy_engine.enforce(user_id, 'mark_no_show', 'appointment', context)
+            self.policy_engine.enforce(user_id, 'mark_no_show', 'appointment', context)
         except PermissionDenied as e:
             logger.warning(f"User {user_id} denied to mark no-show for appointment {appointment_id}: {e}")
             raise
@@ -316,7 +330,7 @@ class BookingService:
 
         context = {'resource': appointment}
         try:
-            policy_engine.enforce(user_id, 'view', 'appointment', context)
+            self.policy_engine.enforce(user_id, 'view', 'appointment', context)
         except PermissionDenied as e:
             logger.warning(f"User {user_id} denied to view appointment {appointment_id}: {e}")
             raise
@@ -333,11 +347,12 @@ class BookingService:
         """جلب مواعيد مريض معين (مع التحقق من الصلاحية)."""
         context = {'resource': {'patient_id': patient_id}}
         try:
-            policy_engine.enforce(user_id, 'view', 'appointment', context)
+            self.policy_engine.enforce(user_id, 'view', 'appointment', context)
         except PermissionDenied as e:
             logger.warning(f"User {user_id} denied to view appointments for patient {patient_id}: {e}")
             raise
 
+        limit = min(limit, self.MAX_LIST_LIMIT)
         return self.appointment_repo.get_appointments_by_patient(patient_id, limit=limit, offset=offset)
 
     def list_appointments_by_doctor(
@@ -352,11 +367,12 @@ class BookingService:
         """جلب مواعيد طبيب معين (مع التحقق من الصلاحية)."""
         context = {'resource': {'doctor_id': doctor_id}}
         try:
-            policy_engine.enforce(user_id, 'view', 'appointment', context)
+            self.policy_engine.enforce(user_id, 'view', 'appointment', context)
         except PermissionDenied as e:
             logger.warning(f"User {user_id} denied to view appointments for doctor {doctor_id}: {e}")
             raise
 
+        limit = min(limit, self.MAX_LIST_LIMIT)
         return self.appointment_repo.get_appointments_by_doctor(
             doctor_id, from_date, to_date, limit, offset
         )

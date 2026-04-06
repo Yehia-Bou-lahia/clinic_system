@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from psycopg2 import IntegrityError
+from psycopg2.extras import RealDictCursor
 from database.connection import db
 from core.exceptions import (
     DatabaseError,
@@ -28,7 +29,8 @@ class AppointmentRepository:
         patient_id: uuid.UUID,
         doctor_id: uuid.UUID,
         appointment_datetime: datetime,
-        notes: Optional[str] = None
+        notes: Optional[str] = None,
+        conn: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
         إنشاء موعد جديد، الحالة PENDING تلقائياً.
@@ -48,7 +50,9 @@ class AppointmentRepository:
             )
             RETURNING {APPOINTMENT_COLUMNS};
         """
-        with db.get_cursor() as cursor:
+
+        if conn:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
             try:
                 cursor.execute(query, (patient_id, doctor_id, appointment_datetime, notes))
                 result = cursor.fetchone()
@@ -59,17 +63,42 @@ class AppointmentRepository:
                 if 'unique constraint' in str(e):
                     raise AppointmentConflictError("Time slot is already booked for this doctor.")
                 raise
+        else:
+            with db.get_cursor() as cursor:
+                try:
+                    cursor.execute(query, (patient_id, doctor_id, appointment_datetime, notes))
+                    result = cursor.fetchone()
+                    if not result:
+                        raise DatabaseError("Failed to create appointment.")
+                    return result
+                except IntegrityError as e:
+                    if 'unique constraint' in str(e):
+                        raise AppointmentConflictError("Time slot is already booked for this doctor.")
+                    raise
+
+    @staticmethod
+    def create_appointment_with_lock(
+        patient_id: uuid.UUID,
+        doctor_id: uuid.UUID,
+        appointment_datetime: datetime,
+        notes: Optional[str] = None,
+        conn: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """
+        إنشاء موعد مع الاعتماد على القيد الفريد (UNIQUE constraint) لمنع الحجز المزدوج.
+        لا يحتاج إلى استعلام availability منفصل.
+        """
+        # نفس منطق create_appointment ولكن يُستخدم ضمن معاملة مع conn
+        return AppointmentRepository.create_appointment(
+            patient_id, doctor_id, appointment_datetime, notes, conn
+        )
 
     @staticmethod
     def get_appointment_by_id(appointment_id: uuid.UUID) -> Optional[Dict[str, Any]]:
-        """
-        جلب موعد بواسطة المعرف.
-        تعيد None إذا لم يوجد.
-        """
         query = _SELECT_APPOINTMENT + " WHERE id = %s;"
         with db.get_cursor() as cursor:
             cursor.execute(query, (appointment_id,))
-            return cursor.fetchone()   # تعيد None إذا لم يوجد
+            return cursor.fetchone()
 
     @staticmethod
     def get_appointments_by_patient(
@@ -78,18 +107,13 @@ class AppointmentRepository:
         limit: int = 20,
         offset: int = 0
     ) -> List[Dict[str, Any]]:
-        """
-        جلب مواعيد مريض معين، مع فلترة اختيارية حسب الحالة.
-        """
         query = _SELECT_APPOINTMENT + " WHERE patient_id = %s"
         params = [patient_id]
-
         if status:
             query += " AND status = %s"
             params.append(status)
         query += " ORDER BY appointment_datetime DESC LIMIT %s OFFSET %s;"
         params.extend([limit, offset])
-
         with db.get_cursor() as cursor:
             cursor.execute(query, params)
             return cursor.fetchall()
@@ -102,12 +126,8 @@ class AppointmentRepository:
         limit: int = 20,
         offset: int = 0
     ) -> List[Dict[str, Any]]:
-        """
-        جلب مواعيد طبيب معين، مع فلترة اختيارية حسب الفترة الزمنية.
-        """
         query = _SELECT_APPOINTMENT + " WHERE doctor_id = %s"
         params = [doctor_id]
-
         if from_datetime:
             query += " AND appointment_datetime >= %s"
             params.append(from_datetime)
@@ -116,7 +136,6 @@ class AppointmentRepository:
             params.append(to_datetime)
         query += " ORDER BY appointment_datetime DESC LIMIT %s OFFSET %s;"
         params.extend([limit, offset])
-
         with db.get_cursor() as cursor:
             cursor.execute(query, params)
             return cursor.fetchall()
@@ -129,12 +148,8 @@ class AppointmentRepository:
         limit: int = 20,
         offset: int = 0
     ) -> List[Dict[str, Any]]:
-        """
-        جلب جميع المواعيد (للاستخدام الإداري)، مع فلترة اختيارية.
-        """
         query = _SELECT_APPOINTMENT + " WHERE 1=1"
         params = []
-
         if status:
             query += " AND status = %s"
             params.append(status)
@@ -144,19 +159,14 @@ class AppointmentRepository:
         if to_datetime:
             query += " AND appointment_datetime <= %s"
             params.append(to_datetime)
-
         query += " ORDER BY appointment_datetime DESC LIMIT %s OFFSET %s;"
         params.extend([limit, offset])
-
         with db.get_cursor() as cursor:
             cursor.execute(query, params)
             return cursor.fetchall()
 
     @staticmethod
     def count_pending_by_patient(patient_id: uuid.UUID) -> int:
-        """
-        عدد المواعيد المعلقة (PENDING) لمريض معين.
-        """
         query = """
             SELECT COUNT(*) as cnt FROM appointments
             WHERE patient_id = %s AND status = 'PENDING'
@@ -168,9 +178,6 @@ class AppointmentRepository:
 
     @staticmethod
     def confirm_appointment(appointment_id: uuid.UUID) -> Dict[str, Any]:
-        """
-        تأكيد الموعد (PENDING → CONFIRMED).
-        """
         query = f"""
             UPDATE appointments
             SET status = 'CONFIRMED', confirmed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
@@ -181,17 +188,11 @@ class AppointmentRepository:
             cursor.execute(query, (appointment_id,))
             updated = cursor.fetchone()
             if not updated:
-                raise AppointmentNotFoundError(
-                    f"Appointment with ID {appointment_id} not found or not in PENDING state."
-                )
+                raise AppointmentNotFoundError(f"Appointment with ID {appointment_id} not found or not in PENDING state.")
             return updated
 
     @staticmethod
     def cancel_appointment(appointment_id: uuid.UUID, reason: str, cancelled_by: str) -> Dict[str, Any]:
-        """
-        إلغاء موعد.
-        cancelled_by: 'patient', 'doctor', 'auto'
-        """
         status_map = {
             'patient': 'CANCELLED_BY_PATIENT',
             'doctor': 'CANCELLED_BY_DOCTOR',
@@ -200,9 +201,7 @@ class AppointmentRepository:
         if cancelled_by not in status_map:
             raise ValueError("cancelled_by must be one of 'patient', 'doctor', or 'auto'.")
         new_status = status_map[cancelled_by]
-
         invalid_statuses = ('CANCELLED_BY_PATIENT', 'CANCELLED_BY_DOCTOR', 'CANCELLED_AUTO', 'COMPLETED', 'NO_SHOW')
-
         query = f"""
             UPDATE appointments
             SET status = %s, cancellation_reason = %s, updated_at = CURRENT_TIMESTAMP
@@ -220,9 +219,6 @@ class AppointmentRepository:
 
     @staticmethod
     def check_in(appointment_id: uuid.UUID) -> Dict[str, Any]:
-        """
-        تسجيل وصول المريض (CONFIRMED → IN_PROGRESS).
-        """
         query = f"""
             UPDATE appointments
             SET status = 'IN_PROGRESS', checked_in_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
@@ -233,16 +229,11 @@ class AppointmentRepository:
             cursor.execute(query, (appointment_id,))
             updated = cursor.fetchone()
             if not updated:
-                raise AppointmentNotFoundError(
-                    f"Appointment with ID {appointment_id} not found or not in CONFIRMED state."
-                )
+                raise AppointmentNotFoundError(f"Appointment with ID {appointment_id} not found or not in CONFIRMED state.")
             return updated
 
     @staticmethod
     def complete_appointment(appointment_id: uuid.UUID) -> Dict[str, Any]:
-        """
-        إنهاء الموعد (IN_PROGRESS → COMPLETED).
-        """
         query = f"""
             UPDATE appointments
             SET status = 'COMPLETED', completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
@@ -253,16 +244,11 @@ class AppointmentRepository:
             cursor.execute(query, (appointment_id,))
             updated = cursor.fetchone()
             if not updated:
-                raise AppointmentNotFoundError(
-                    f"Appointment with ID {appointment_id} not found or not in IN_PROGRESS state."
-                )
+                raise AppointmentNotFoundError(f"Appointment with ID {appointment_id} not found or not in IN_PROGRESS state.")
             return updated
 
     @staticmethod
     def mark_no_show(appointment_id: uuid.UUID) -> Dict[str, Any]:
-        """
-        تسجيل عدم حضور المريض (CONFIRMED → NO_SHOW).
-        """
         query = f"""
             UPDATE appointments
             SET status = 'NO_SHOW', no_show_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
@@ -273,9 +259,7 @@ class AppointmentRepository:
             cursor.execute(query, (appointment_id,))
             updated = cursor.fetchone()
             if not updated:
-                raise AppointmentNotFoundError(
-                    f"Appointment with ID {appointment_id} not found or not in CONFIRMED state."
-                )
+                raise AppointmentNotFoundError(f"Appointment with ID {appointment_id} not found or not in CONFIRMED state.")
             return updated
 
     @staticmethod
@@ -283,10 +267,6 @@ class AppointmentRepository:
         appointment_id: uuid.UUID,
         new_datetime: datetime
     ) -> Dict[str, Any]:
-        """
-        إعادة جدولة الموعد (تغيير الوقت).
-        لا يقوم بالتحقق من التعارض – هذا دور الـ Service.
-        """
         query = f"""
             UPDATE appointments
             SET appointment_datetime = %s, updated_at = CURRENT_TIMESTAMP
@@ -298,9 +278,7 @@ class AppointmentRepository:
                 cursor.execute(query, (new_datetime, appointment_id))
                 updated = cursor.fetchone()
                 if not updated:
-                    raise AppointmentNotFoundError(
-                        f"Appointment with ID {appointment_id} not found."
-                    )
+                    raise AppointmentNotFoundError(f"Appointment with ID {appointment_id} not found.")
                 return updated
             except IntegrityError as e:
                 if 'unique constraint' in str(e):
@@ -312,9 +290,6 @@ class AppointmentRepository:
         appointment_id: uuid.UUID,
         **fields: Any
     ) -> Dict[str, Any]:
-        """
-        تحديث الحقول المسموحة (notes, is_paid, payment_amount).
-        """
         if not fields:
             return AppointmentRepository.get_appointment_by_id(appointment_id)
 
@@ -339,16 +314,11 @@ class AppointmentRepository:
             cursor.execute(query, tuple(values))
             updated = cursor.fetchone()
             if not updated:
-                raise AppointmentNotFoundError(
-                    f"Appointment with ID {appointment_id} not found."
-                )
+                raise AppointmentNotFoundError(f"Appointment with ID {appointment_id} not found.")
             return updated
-        
-    # database/queries/appointment_repository.py (إضافة داخل الكلاس)
 
     @staticmethod
     def count_future_by_patient(patient_id: uuid.UUID) -> int:
-        """عدد المواعيد المستقبلية (غير الملغاة) لمريض معين."""
         with db.get_cursor() as cursor:
             cursor.execute("""
                 SELECT COUNT(*) as cnt FROM appointments
@@ -358,18 +328,15 @@ class AppointmentRepository:
             """, (patient_id,))
             row = cursor.fetchone()
             return row['cnt'] if row else 0
-        
+
     @staticmethod
     def count_future_by_doctor(doctor_id: uuid.UUID) -> int:
-        """عدد المواعيد المستقبلية (غير الملغاة) لطبيب معين."""
         with db.get_cursor() as cursor:
             cursor.execute("""
                 SELECT COUNT(*) as cnt FROM appointments
                 WHERE doctor_id = %s
                   AND appointment_datetime > CURRENT_TIMESTAMP
                   AND status NOT IN ('CANCELLED_BY_PATIENT','CANCELLED_BY_DOCTOR','CANCELLED_AUTO','NO_SHOW')
-                """, (doctor_id,))
+            """, (doctor_id,))
             row = cursor.fetchone()
             return row['cnt'] if row else 0
-
-    

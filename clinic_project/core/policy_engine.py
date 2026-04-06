@@ -1,3 +1,4 @@
+from email.policy import default
 import uuid
 import time 
 import logging
@@ -161,11 +162,12 @@ class PolicyEngine:
         logger.debug(f"User {user_id} (role {role_id}) {action} {resource} -> DENIED (no matching policy)")
         return False
     
-    def enforce(self,
-                user_id: uuid.UUID,
-                action: str,
-                resource: str,
-                context:  Optional[Dict[str, Any]] = None) -> None:
+    def enforce(
+            self,
+            user_id: uuid.UUID,
+            action: str,
+            resource: str,                
+            context:  Optional[Dict[str, Any]] = None) -> None:
         """ رفع الإستثناء إدا لم تكن الصلاحية متاحة"""
         if not self.can(user_id, action, resource, context):
             raise PermissionDenied(f"User {user_id} is not allowed to {action} on {resource}")
@@ -191,6 +193,20 @@ class PolicyEngine:
             else:
                 self._user_role_cache.pop(str(user_id), None)
                 logger.info(f"User role cache cleared for user {user_id}.")
+
+    def get_config(self, key: str, default: Any = None) -> Any:
+        """جلب قيمة إعداد من قاعدة البيانات، مع إمكانية التخزين المؤقت."""
+        # يمكنك إضافة cache بسيط لتجنب استعلامات DB المتكررة
+        with db.get_cursor() as cursor:
+            cursor.execute("SELECT value FROM settings WHERE key = %s", (key,))
+            row = cursor.fetchone()
+            if row:
+                # تحويل القيمة إلى النوع المناسب (int, bool, str)
+                try:
+                    return int(row['value'])
+                except ValueError:
+                    return row['value']
+            return default
 
 
 #------------------------------------------------    

@@ -69,7 +69,7 @@ This system digitizes and streamlines clinic operations including patient manage
 - ✅ `UserService` (complete)
 - ✅ `BookingService` (core appointment logic)
 - ✅ Doctor availability check (with schedule & conflicts)
-- ⏳ `PatientService`, `DoctorService`, `VisitReportService`
+- ✅ `PatientService`, `DoctorService`, `VisitReportService`
 - ⏳ API layer (Django REST Framework, JWT)
 - ⏳ Frontend (planned – React or Vue)
 # License
